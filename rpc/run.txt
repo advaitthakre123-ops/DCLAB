@@ -1,0 +1,7 @@
+xml/pyro 
+run client and server
+
+grpc 
+proto 
+python3 -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=.calculator.proto
+run server and client
