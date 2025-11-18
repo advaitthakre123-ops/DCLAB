@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+
+service Fibonacci {
+  rpc GetSequence (FibonacciRequest) returns (FibonacciResponse);
+}
+
+
+message FibonacciRequest {
+  int32 n = 1;  // Generate Fibonacci numbers up to this value (inclusive)
+}
+
+
+message FibonacciResponse {
+  repeated int64 sequence = 1;  // List of Fibonacci numbers up to n
+}
