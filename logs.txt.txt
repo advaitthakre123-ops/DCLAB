@@ -1,0 +1,1115 @@
+EXP1 (Distributed Banking System):
+import threading,time,queue,random
+
+class Node:
+    def __init__(self,id,allnodes):
+        self.id=id
+        self.allnodes=allnodes
+        self.leader=None
+        self.clock=0
+        self.alive=True
+        self.inbox=queue.Queue()
+        self.got_ok=False
+        self.balance=100
+
+    def send(self,o,m):
+        if o.alive:
+            o.inbox.put((self.id,m))
+
+    def broadcast(self,m):
+        for n in self.allnodes:
+            if n!=self:
+                self.send(n,m)
+
+    def start_election(self,ctr):
+        self.got_ok=False
+        higher=[n for n in self.allnodes if n.id>self.id and n.alive]
+        for h in higher:
+            self.send(h,{'t':'el','src':self.id,'ctr':ctr})
+        time.sleep(1)
+        if not self.got_ok:
+            self.leader=self.id
+            for n in self.allnodes:
+                if n!=self:
+                    self.send(n,{'t':'co','l':self.id})
+            ctr[0]+=1
+
+    def handle(self,src,m):
+        if m['t']=='el':
+            self.send(self.allnodes[src-1],{'t':'ok'})
+            threading.Thread(target=self.start_election,args=(m['ctr'],)).start()
+        elif m['t']=='ok':
+            self.got_ok=True
+        elif m['t']=='co':
+            self.leader=m['l']
+        elif m['t']=='tx':
+            self.clock=max(self.clock,m['ts'])+1
+            if m['op'][0]=="D":
+                self.balance+=m['op'][1]
+            else:
+                self.balance-=m['op'][1]
+            print(f"Node{self.id} applied {m['op'][0]} {m['op'][1]} @lc={self.clock} bal={self.balance}")
+        elif m['t']=='sync':
+            self.balance=m['bal']
+
+    def heartbeat(self):
+        while True:
+            time.sleep(1)
+            if self.leader==self.id:
+                self.broadcast({'t':'hb','ts':time.time()})
+
+    def run(self):
+        while True:
+            try:
+                src,m=self.inbox.get(timeout=0.5)
+                if m['t']=='hb':
+                    pass
+                else:
+                    self.handle(src,m)
+            except:
+                pass
+
+def client_worker(nodes,runflag):
+    while runflag[0]:
+        leader=[n for n in nodes if n.leader==n.id and n.alive]
+        if leader:
+            ld=leader[0]
+            ld.clock+=1
+            ts=ld.clock
+            op=random.choice([("D",10),("W",5)])
+            ld.balance=ld.balance+(10 if op[0]=="D" else -5)
+            ld.broadcast({'t':'tx','op':op,'ts':ts})
+            for n in nodes:
+                if n!=ld and n.alive:
+                    ld.send(n,{'t':'sync','bal':ld.balance})
+        time.sleep(1)
+
+def monitor(nodes,ctr):
+    last=time.time()
+    while True:
+        time.sleep(2)
+        leader=[n for n in nodes if n.leader==n.id and n.alive]
+        if not leader:
+            continue
+        l=leader[0]
+        if not l.alive or time.time()-last>3:
+            print("Leader crashed, starting election")
+            live=[n for n in nodes if n.alive]
+            highest=max(live,key=lambda x:x.id)
+            highest.start_election(ctr)
+        last=time.time()
+
+def simulate():
+    print("Using Lamport Logical Clocks because they guarantee consistent ordering without relying on physical time")
+    print("Enter number of servers:")
+    n=int(input().strip())
+    nodes=[Node(i,[]) for i in range(1,n+1)]
+    for nd in nodes: nd.allnodes=nodes
+    for nd in nodes: threading.Thread(target=nd.run,daemon=True).start()
+    for nd in nodes: threading.Thread(target=nd.heartbeat,daemon=True).start()
+
+    print("Enter node to trigger election:")
+    start=int(input().strip())
+    ec=[0]
+
+    nodes[start-1].start_election(ec)
+    time.sleep(2)
+
+    leader=[x for x in nodes if x.leader==x.id]
+    if leader:
+        leader=leader[0]
+        print("Leader elected:",leader.id)
+    else:
+        print("Election failed")
+        return
+
+    runflag=[True]
+    threading.Thread(target=client_worker,args=(nodes,runflag),daemon=True).start()
+    threading.Thread(target=monitor,args=(nodes,ec),daemon=True).start()
+
+    print("\nSimulating crash in 6 seconds...")
+    time.sleep(6)
+    print("Crashing leader",leader.id)
+    leader.alive=False
+
+    time.sleep(8)
+    runflag[0]=False
+
+    print("\nFinal balances:")
+    for nd in nodes:
+        print("Node",nd.id,"alive=",nd.alive,"bal=",nd.balance)
+
+    print("Used",ec[0],"election cycles")
+
+if __name__=="__main__":
+    simulate()
+
+
+=====================================================================================================================================
+
+EXP2 (Remote Code Execution Engine):
+[client]
+import socket
+
+def client():
+    s=socket.socket()
+    s.connect(("localhost",9000))
+    print("Connected")
+    while True:
+        x=input("send expr: ")
+        if x=="exit":
+            break
+        s.send(x.encode())
+        print("result:",s.recv(1024).decode())
+
+client()
+
+
+
+[server]
+import socket,threading,queue,ast
+
+tasks=queue.Queue()
+
+def safe_exec(expr):
+    tree=ast.parse(expr,mode='eval')
+    for n in ast.walk(tree):
+        if not isinstance(n,(ast.Expression,ast.Num,ast.BinOp,ast.UnaryOp,ast.Add,ast.Sub,ast.Mult,ast.Div,ast.Mod,ast.Pow,ast.Load)):
+            return "invalid"
+    return str(eval(expr))
+
+def worker(c,a):
+    while True:
+        try:
+            data=c.recv(1024).decode()
+            if not data:
+                break
+            out=safe_exec(data.strip())
+            c.send(out.encode())
+        except:
+            break
+    c.close()
+
+def server():
+    s=socket.socket()
+    s.bind(("localhost",9000))
+    s.listen(5)
+    print("Server ready")
+    while True:
+        c,a=s.accept()
+        threading.Thread(target=worker,args=(c,a),daemon=True).start()
+
+server()
+
+=====================================================================================================================================
+
+EXP3 (Managing API keys using Multi-threading):-
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, request
+
+class KeyManager:
+    def __init__(self):
+        self.keys = {}
+        self.lock = threading.Lock()
+        self.KEY_TTL_SECONDS = 300
+        self.BLOCK_TTL_SECONDS = 60
+        self.CLEANUP_INTERVAL_SECONDS = 5
+        self.AVAILABLE = "AVAILABLE"
+        self.BLOCKED = "BLOCKED"
+        threading.Thread(target=self._cleanup_loop, daemon=True).start()
+
+    def _cleanup_loop(self):
+        while True:
+            try:
+                self._run_cleanup()
+            except Exception as e:
+                print(f"Cleanup thread error: {e}")
+            time.sleep(self.CLEANUP_INTERVAL_SECONDS)
+
+    def _run_cleanup(self):
+        now = datetime.now()
+        keys_to_delete = []
+        keys_to_unblock = []
+
+        with self.lock:
+            for key_id, data in self.keys.items():
+                # 1. Check for key expiry (5-minute TTL)
+                if data["expiry_time"] < now:
+                    keys_to_delete.append(key_id)
+
+                # 2. Check for block auto-release (60-second block TTL)
+                if data["status"] == self.BLOCKED and data["blocked_until"] < now:
+                    keys_to_unblock.append(key_id)
+
+            for key_id in keys_to_delete:
+                del self.keys[key_id]
+
+            for key_id in keys_to_unblock:
+                self.keys[key_id]["status"] = self.AVAILABLE
+                self.keys[key_id]["blocked_until"] = None
+
+    def create_key(self):
+        key_id = uuid.uuid4().hex
+        with self.lock:
+            self.keys[key_id] = {
+                "id": key_id,
+                "status": self.AVAILABLE,
+                "expiry_time": datetime.now() + timedelta(seconds=self.KEY_TTL_SECONDS),
+                "blocked_until": None
+            }
+        return key_id
+
+    def get_available_key(self):
+        with self.lock:
+            for key_id, data in self.keys.items():
+                if data["status"] == self.AVAILABLE:
+                    data["status"] = self.BLOCKED
+                    data["blocked_until"] = datetime.now() + timedelta(seconds=self.BLOCK_TTL_SECONDS)
+                    return key_id
+        return None
+
+    def unblock_key(self, key_id):
+        with self.lock:
+            if key_id in self.keys and self.keys[key_id]["status"] == self.BLOCKED:
+                self.keys[key_id]["status"] = self.AVAILABLE
+                self.keys[key_id]["blocked_until"] = None
+                return True
+            return False
+
+    def keep_alive(self, key_id):
+        with self.lock:
+            if key_id in self.keys:
+                # Keep-alive resets the 5-minute TTL
+                self.keys[key_id]["expiry_time"] = datetime.now() + timedelta(seconds=self.KEY_TTL_SECONDS)
+                return True
+            return False
+
+    def get_keys_status(self):
+        with self.lock:
+            # Prepare a serializable copy of the keys for JSON
+            status = {}
+            for k, v in self.keys.items():
+                status[k] = {
+                    "status": v["status"],
+                    "expiry_time": v["expiry_time"].isoformat() if v["expiry_time"] else None,
+                    "blocked_until": v["blocked_until"].isoformat() if v["blocked_until"] else None
+                }
+            return status
+
+app = Flask(__name__)
+manager = KeyManager()
+
+@app.route("/create", methods=["POST"])
+def create_key_endpoint():
+    key_id = manager.create_key()
+    return jsonify({"key_id": key_id, "message": "Key created successfully"}), 201
+
+@app.route("/get_key", methods=["POST"])
+def get_key_endpoint():
+    key_id = manager.get_available_key()
+    if key_id:
+        return jsonify({"key_id": key_id, "status": "BLOCKED"}), 200
+    return jsonify({"message": "No available keys at this time"}), 404
+
+@app.route("/unblock/<key_id>", methods=["POST"])
+def unblock_key_endpoint(key_id):
+    if manager.unblock_key(key_id):
+        return jsonify({"key_id": key_id, "status": "AVAILABLE", "message": "Key unblocked"}), 200
+    return jsonify({"message": "Key not found or not currently blocked"}), 404
+
+@app.route("/keep_alive/<key_id>", methods=["POST"])
+def keep_alive_endpoint(key_id):
+    if manager.keep_alive(key_id):
+        return jsonify({"key_id": key_id, "message": "TTL extended by 5 minutes"}), 200
+    return jsonify({"message": "Key not found"}), 404
+
+@app.route("/status", methods=["GET"])
+def status_endpoint():
+    return jsonify(manager.get_keys_status()), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+
+'''
+--- STEP-BY-STEP COMMAND GUIDE FOR DEMO ---
+
+1️⃣ Start the server
+   Run the Python script:
+   PS> python your_script_name.py
+   (Server will start at http://0.0.0.0:5000/)
+
+2️⃣ Create a new API key
+   PowerShell:
+   PS> Invoke-RestMethod -Uri http://127.0.0.1:5000/create -Method POST
+   (Returns JSON with your new key_id)
+
+3️⃣ Get an available key (marks it as BLOCKED)
+   PS> 
+   (Returns key_id and status BLOCKED, or 404 if none available)
+
+4️⃣ Keep-alive a key to extend TTL
+   Replace <key_id> with the key from step 2 or 3
+   PS> Invoke-RestMethod -Uri http://127.0.0.1:5000/keep_alive/<key_id> -Method POST
+   (TTL extended by 5 minutes)
+
+5️⃣ Unblock a key manually
+   Replace <key_id> with your key
+   PS> Invoke-RestMethod -Uri http://127.0.0.1:5000/unblock/<key_id> -Method POST
+   (Key becomes AVAILABLE again)
+
+6️⃣ Check current status of all keys
+   PS> Invoke-RestMethod -Uri http://127.0.0.1:5000/status -Method GET
+   (Shows all keys with their status, expiry_time, blocked_until)
+
+7️⃣ Automatic behavior
+   - Any key without keep-alive for 5 minutes → auto-deleted
+   - Any blocked key not unblocked manually → auto-unblocked after 60 seconds
+
+✅ Notes:
+   - Always use POST for `/create`, `/get_key`, `/keep_alive`, `/unblock`
+   - Use GET for `/status`
+   - PowerShell’s Invoke-RestMethod handles JSON automatically
+   - You can also test using Python `requests` if preferred
+'''
+
+=====================================================================================================================================
+
+EXP4 (Distributed Logging System for anomaly detection):-
+import threading
+import time
+import random
+from queue import Queue
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+
+NUM_SERVERS = int(input("Enter number of servers to simulate: "))
+LOGS_PER_SERVER = int(input("Enter number of logs each server should generate: "))
+
+print("Distributed Logging System Simulation (Lamport Logical Clocks)")
+print(f"{NUM_SERVERS} servers will each generate {LOGS_PER_SERVER} logs with unsynchronized clocks.")
+print("Visit http://127.0.0.1:5000/logs after a few seconds to see globally ordered logs.")
+print("Logs are sorted by Lamport logical clocks, with server ID as tie-breaker.\n")
+
+class Server:
+    def __init__(self, server_id, log_queue):
+        self.id = server_id
+        self.clock = 0
+        self.logs = []
+        self.queue = log_queue
+
+    def generate_logs(self):
+        for i in range(LOGS_PER_SERVER):
+            time.sleep(random.uniform(0.1,0.5))
+            self.clock += 1
+            log_entry = {
+                "server_id": self.id,
+                "event": f"Event {i+1} from Server {self.id}",
+                "lamport_clock": self.clock,
+                "raw_time": time.time()
+            }
+            self.logs.append(log_entry)
+            self.queue.put(log_entry)
+
+log_queue = Queue()
+servers = [Server(i, log_queue) for i in range(1, NUM_SERVERS+1)]
+
+def start_servers():
+    threads = []
+    for s in servers:
+        t = threading.Thread(target=s.generate_logs)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+@app.route("/logs", methods=["GET"])
+def get_merged_logs():
+    merged_logs = []
+    while not log_queue.empty():
+        merged_logs.append(log_queue.get())
+    merged_logs.sort(key=lambda x: (x['lamport_clock'], x['server_id']))
+    return jsonify(merged_logs)
+
+if __name__ == "__main__":
+    threading.Thread(target=start_servers).start()
+    app.run(port=5000)
+
+
+=====================================================================================================================================
+
+EXP5 (Implement a distributed Arithmetic Service where a client invokes remote methods):-
+[client]
+import xmlrpc.client
+
+server_url = "http://127.0.0.1:8000"
+proxy = xmlrpc.client.ServerProxy(server_url, allow_none=True)
+
+a=float(input("Enter the First Number: "))
+b=float(input("Enter the Second Number: "))
+
+print(f"Calling add({a},{b}) remotely: {proxy.add(a,b)}")
+print(f"Calling subtract({a},{b}) remotely: {proxy.subtract(a,b)}")
+print(f"Calling multiply({a},{b}) remotely: {proxy.multiply(a,b)}")
+
+
+[server]
+from xmlrpc.server import SimpleXMLRPCServer
+from xmlrpc.server import SimpleXMLRPCRequestHandler
+
+class ArithmeticService:
+    def add(self, a, b):
+        return a + b
+
+    def subtract(self, a, b):
+        return a - b
+
+    def multiply(self, a, b):
+        return a * b
+
+if __name__ == "__main__":
+    print("Starting Arithmetic RPC Server on port 8000...")
+    server = SimpleXMLRPCServer(("0.0.0.0", 8000), allow_none=True)
+    service = ArithmeticService()
+    server.register_instance(service)
+    print("Server ready. Methods: add(a,b), subtract(a,b), multiply(a,b)")
+    server.serve_forever()
+
+=====================================================================================================================================
+
+EXP6 (Simulate Vector Clocks for logical clock synchronization.):-
+import threading
+import time
+import random
+
+NUM_PROCESSES = int(input("Enter the number of prcess: "))
+EVENTS_PER_PROCESS = int(input("Ennter the number of process events: "))
+
+class Process:
+    def __init__(self, pid, all_processes):
+        self.pid = pid
+        self.clock = [0]*NUM_PROCESSES
+        self.all_processes = all_processes
+        self.events = []
+
+    def local_event(self):
+        self.clock[self.pid] += 1
+        event = f"Process {self.pid} local event {len(self.events)+1}"
+        self.events.append((event, self.clock.copy()))
+        print(f"[Local] {event} | Vector Clock: {self.clock}")
+
+    def send_message(self, target_pid):
+        self.clock[self.pid] += 1
+        msg = self.clock.copy()
+        target = self.all_processes[target_pid]
+        target.receive_message(msg, self.pid)
+
+    def receive_message(self, msg_clock, sender_pid):
+        self.clock = [max(self.clock[i], msg_clock[i]) for i in range(NUM_PROCESSES)]
+        self.clock[self.pid] += 1
+        event = f"Process {self.pid} received message from {sender_pid}"
+        self.events.append((event, self.clock.copy()))
+        print(f"[Receive] {event} | Vector Clock: {self.clock}")
+
+    def run(self):
+        for _ in range(EVENTS_PER_PROCESS):
+            time.sleep(random.uniform(0.1,0.5))
+            if random.random() < 0.5:
+                self.local_event()
+            else:
+                target_pid = random.choice([i for i in range(NUM_PROCESSES) if i != self.pid])
+                self.send_message(target_pid)
+
+processes = []
+for i in range(NUM_PROCESSES):
+    p = Process(i, None)
+    processes.append(p)
+for p in processes:
+    p.all_processes = processes
+
+threads = []
+for p in processes:
+    t = threading.Thread(target=p.run)
+    t.start()
+    threads.append(t)
+for t in threads:
+    t.join()
+
+print("\n--- Final Events & Vector Clocks ---")
+for p in processes:
+    print(f"\nProcess {p.pid} events:")
+    for e, vc in p.events:
+        print(f"{e} | {vc}")
+=====================================================================================================================================
+
+EXP7 (Design a system of distributed nodes and simulate leader election using the Bully Algorithm):-
+import threading
+import time
+import random
+
+class Node:
+    def __init__(self, node_id, priority, nodes):
+        self.node_id = node_id
+        self.priority = priority
+        self.nodes = nodes
+        self.alive = True
+        self.leader = None
+
+    def fail(self):
+        self.alive = False
+        print(f"[FAIL] Node {self.node_id} failed.")
+
+    def recover(self):
+        self.alive = True
+        print(f"[RECOVER] Node {self.node_id} recovered.")
+        self.start_election()
+
+    def start_election(self):
+        print(f"[ELECTION] Node {self.node_id} initiating election.")
+        higher_nodes = [n for n in self.nodes if n.priority > self.priority and n.alive]
+        if not higher_nodes:
+            self.leader = self.node_id
+            print(f"[LEADER] Node {self.node_id} becomes the new leader.")
+            for n in self.nodes:
+                if n.alive:
+                    n.leader = self.leader
+        else:
+            for n in higher_nodes:
+                print(f"[ELECTION] Node {self.node_id} sends election message to Node {n.node_id}")
+                n.start_election()
+
+def simulate_bully(nodes):
+    # Randomly fail current leader if any
+    current_leader = max(nodes, key=lambda n: n.priority)
+    print(f"[INIT] Node {current_leader.node_id} is initially leader.")
+    time.sleep(1)
+    # Fail leader
+    current_leader.fail()
+    time.sleep(1)
+    # Trigger election from random alive node
+    alive_nodes = [n for n in nodes if n.alive]
+    starter = random.choice(alive_nodes)
+    starter.start_election()
+    print("\n[RESULT] Leader election complete.")
+    for n in nodes:
+        print(f"Node {n.node_id} sees leader as Node {n.leader}")
+
+if __name__ == "__main__":
+    # Assign nodes with priorities
+    nodes = [
+        Node(1, priority=1, nodes=None),
+        Node(2, priority=2, nodes=None),
+        Node(3, priority=3, nodes=None),
+        Node(4, priority=4, nodes=None),
+        Node(5, priority=5, nodes=None)
+    ]
+    for n in nodes:
+        n.nodes = nodes
+    simulate_bully(nodes)
+=====================================================================================================================================
+
+EXP8 (Simulate the Ring Election Algorithm with circular process arrangement):-
+import threading
+import time
+import random
+
+class Process:
+    def __init__(self, pid, priority):
+        self.pid = pid
+        self.priority = priority
+        self.alive = True
+        self.leader = None
+        self.next_process = None
+
+    def fail(self):
+        self.alive = False
+        print(f"[FAIL] Process {self.pid} failed.")
+
+    def recover(self):
+        self.alive = True
+        print(f"[RECOVER] Process {self.pid} recovered.")
+
+    def start_election(self):
+        print(f"[ELECTION] Process {self.pid} starts election.")
+        election_msg = [self.priority]
+        current = self.next_process
+        while current.pid != self.pid:
+            if current.alive:
+                print(f"[ELECTION] Passing message {election_msg} to Process {current.pid}")
+                election_msg.append(current.priority)
+            current = current.next_process
+        new_leader_priority = max(election_msg)
+        current = self
+        while True:
+            if current.alive:
+                current.leader = new_leader_priority
+            current = current.next_process
+            if current.pid == self.pid:
+                break
+        print(f"[LEADER] New leader elected with priority {new_leader_priority}")
+
+def simulate_ring(nodes):
+    for i in range(len(nodes)):
+        nodes[i].next_process = nodes[(i+1)%len(nodes)]
+    # Randomly fail leader
+    leader = max(nodes, key=lambda n: n.priority)
+    print(f"[INIT] Process {leader.pid} with priority {leader.priority} is initially leader.")
+    leader.fail()
+    time.sleep(1)
+    # Start election from random alive process
+    starter = random.choice([n for n in nodes if n.alive])
+    starter.start_election()
+    print("\n[RESULT] Election complete. Process view:")
+    for n in nodes:
+        print(f"Process {n.pid} sees leader priority as {n.leader}")
+
+if __name__ == "__main__":
+    nodes = [
+        Process(1, 1),
+        Process(2, 2),
+        Process(3, 3),
+        Process(4, 4),
+        Process(5, 5)
+    ]
+    simulate_ring(nodes)
+=====================================================================================================================================
+
+EXP9 (Build a simple distributed key-value store that shows eventual consistency across replicas.):-
+import threading
+import time
+
+class Replica:
+    def __init__(self,name):
+        self.name=name
+        self.store={}
+
+    def write(self,key,value):
+        self.store[key]=value
+
+    def read(self,key):
+        return self.store.get(key,None)
+
+def propagate(src,replicas,key,value,delay=2):
+    time.sleep(delay)
+    for r in replicas:
+        if r!=src:
+            r.write(key,value)
+
+r1=Replica("R1")
+r2=Replica("R2")
+r3=Replica("R3")
+replicas=[r1,r2,r3]
+
+# write to one replica first
+r1.write("x",10)
+threading.Thread(target=propagate,args=(r1,replicas,"x",10)).start()
+
+print("Immediate read:")
+for r in replicas:
+    print(r.name,r.read("x"))
+
+time.sleep(3)
+print("After propagation:")
+for r in replicas:
+    print(r.name,r.read("x"))
+
+# update another replica
+r2.write("x",20)
+threading.Thread(target=propagate,args=(r2,replicas,"x",20)).start()
+time.sleep(3)
+print("Final state:")
+for r in replicas:
+    print(r.name,r.read("x"))
+
+=====================================================================================================================================
+
+EXP10 (Create a multithreaded server that handles multiple client requests):-
+from flask import Flask, request, jsonify
+import threading
+import time
+
+app = Flask(__name__)
+
+def handle(data):
+    time.sleep(0.5)
+    return data + " processed"
+
+@app.route("/process", methods=["POST"])
+def process_request():
+    thread_name = threading.current_thread().name
+    print(f"[THREAD] Handling request in thread: {thread_name}")
+    data = request.json.get("text","")
+    result = handle(data)
+    return jsonify({"result": result})
+
+if __name__ == "__main__":
+    app.run(threaded=True, port=5000)
+=====================================================================================================================================
+
+EXP11 (Simulate a load balancer that distributes requests to backend servers.):-
+import threading
+import time
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+BACKENDS = ["Server1","Server2","Server3"]
+counter = 0
+lock = threading.Lock()
+
+def process_backend(server_name, data):
+    time.sleep(0.5)  # a small sleep, to SHOW kuch process runnign
+    return f"{server_name} processed {data}"
+
+@app.route("/request", methods=["POST"])
+def handle_request():
+    global counter
+    data = request.json.get("text","")
+    with lock:
+        backend = BACKENDS[counter % len(BACKENDS)]
+        counter += 1
+    result = process_backend(backend, data)
+    print(f"[LOAD BALANCER] Routed '{data}' to {backend}")
+    return jsonify({"result": result, "backend": backend})
+
+if __name__ == "__main__":
+    app.run(threaded=True, port=5000)
+
+=====================================================================================================================================
+
+[CHRISTIAN ALGO]
+
+[server-ntp]
+# server.py
+import socket, time
+
+def timeServer():
+    s=socket.socket()
+    s.bind(("0.0.0.0", 8000))
+    s.listen(1)
+    while True:
+        c,a=s.accept()
+        now=time.time()
+        c.send(str(now).encode())
+        c.close()
+timeServer()
+
+
+
+[node]
+#node
+import socket, time
+
+def crisitianClient():
+    t0=time.time()
+    s=socket.socket()
+    s.connect(("127.0.0.1", 8000))
+    data=s.recv(128).decode()
+    serverTime=float(data)
+    t1=time.time()
+
+    rttBy2=(t1-t0)/2
+    presentTime=serverTime+rttBy2
+    print(f"RREQUEST SENT TIME {t0}")
+    print(f"RECEIVED TIME IS {presentTime}")
+    print(f"OFFSET OF {presentTime-t0}")
+crisitianClient()
+
+=====================================================================================================================================
+
+[pyro5]
+
+[server]
+# Before running: python -m Pyro5.nameserver
+# Install dependency: pip install Pyro5
+
+import Pyro5.api
+
+@Pyro5.api.expose
+class SumService:
+    def compute(self, n):
+        return (n * (n + 1)) // 2
+
+def main():
+    daemon = Pyro5.api.Daemon()             # make a Pyro daemon
+    uri = daemon.register(SumService())     # register the service instance
+
+    try:
+        ns = Pyro5.api.locate_ns()          # locate the name server
+        ns.register("example.sum", uri)     # register with name
+        print("Registered example.sum with the name server.")
+    except Exception as e:
+        print("Warning: could not register with nameserver:", e)
+
+    print("Pyro5 Server running...")
+    daemon.requestLoop()
+
+if __name__ == "__main__":
+    main()
+
+
+
+[client]
+import Pyro5.api
+import time
+
+sum_service = Pyro5.api.Proxy("PYRONAME:example.sum")
+
+n = 20
+num_requests = 5
+
+start = time.time()
+for i in range(num_requests):
+    result = sum_service.compute(n)
+end = time.time()
+
+print(f"Sum of first {n} natural numbers = {result}")
+print(f"Time for {num_requests} requests: {end - start:.6f} seconds")
+
+
+--in case this is needed: sum.proto--
+syntax = "proto3";
+
+service SumService {
+  rpc ComputeSum (SumRequest) returns (SumResponse);
+}
+
+message SumRequest {
+  int32 number = 1;
+}
+
+message SumResponse {
+  int64 result = 1;
+}
+
+
+=====================================================================================================================================
+
+[BERKLEY ALGO]
+
+HARDCODED LOGIC
+
+import random
+
+# fake clocks
+clocks=[100.2,101.7,99.9,100.5]
+
+def berkeley_sync(clocks):
+    # coordinator collects times
+    diffs=[]
+    master=clocks[0]
+    for t in clocks:
+        diffs.append(t-master)
+    avg=sum(diffs)/len(diffs)
+    # compute offsets
+    new_clocks=[]
+    for t in clocks:
+        new_clocks.append(t-avg)
+    return new_clocks
+
+print("before:",clocks)
+print("after:",berkeley_sync(clocks))
+
+
+=====================================================================================================================================
+
+[LAMPORT-ismein NAME CHANGE KARNA HAI]
+
+[server]
+import socket
+
+def lamport_server(host='localhost', port=65432):
+    server_clock = 0
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, port))
+        s.listen()
+        print("Starting Lamport Clock Server…")
+        print(f"Server is listening on {host}:{port}")
+        
+        while True:
+            conn, addr = s.accept()
+            with conn:
+                print(f"Connected by {addr}")
+                data = conn.recv(1024)
+                if not data:
+                    break
+                
+                client_time = int(data.decode())
+                print(f"Received client time: {client_time}")
+                
+                server_clock = max(server_clock, client_time) + 1
+                print(f"Updated server clock: {server_clock}")
+
+if __name__ == "__main__":
+    lamport_server()
+
+
+[client]
+import socket
+import sys
+
+def lamport_client(client_name='USER1', server_ip='10.10.45.66', server_port=65432):
+    client_clock = 0
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((server_ip, server_port))
+
+        client_clock += 1
+        print(f"{client_name} clock on sending: {client_clock}")
+        message=f"Hello from {client_name}, {client_clock}"
+        s.sendall(message.encode())
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        client_name = "USER1 " + sys.argv[1]
+    else:
+        client_name = 'USER1'
+
+    lamport_client(client_name)
+
+=====================================================================================================================================
+
+[CORDINTOR BASED MUTUAL EXCLUSION]
+
+[cordinator]
+import socket,threading
+
+lock=False
+
+def coordinator():
+    global lock
+    s=socket.socket()
+    s.bind(("127.0.0.1",9000))
+    s.listen(5)
+    print("COORDINATOR READY")
+
+    while True:
+        c,a=s.accept()
+        msg=c.recv(64).decode()
+
+        if msg=="REQ":
+            if not lock:
+                lock=True
+                c.send(b"OK")
+            else:
+                c.send(b"WAIT")
+
+        elif msg=="REL":
+            lock=False
+            c.send(b"ACK")
+
+        c.close()
+
+coordinator()
+
+
+
+[node]
+import socket,time,random
+
+def request_cs():
+    s=socket.socket()
+    s.connect(("127.0.0.1",9000))
+    s.send(b"REQ")
+    reply=s.recv(64).decode()
+    s.close()
+    return reply
+
+def release_cs():
+    s=socket.socket()
+    s.connect(("127.0.0.1",9000))
+    s.send(b"REL")
+    ack=s.recv(64).decode()
+    s.close()
+    return ack
+
+def node(id):
+    while True:
+        print(f"node{id}: requesting CS")
+        while True:
+            r=request_cs()
+            if r=="OK":
+                break
+            time.sleep(1)
+        print(f"node{id}: in CS")
+        time.sleep(random.randint(1,3))
+        release_cs()
+        print(f"node{id}: left CS")
+        time.sleep(random.randint(1,4))
+
+node(1)
+
+=====================================================================================================================================
+
+[matrix multiplication mpi wala]
+
+- before doing this, check if pip is installed (which pip)
+- then, run this command:- sudo apt install -y openmpi-bin libopenmpi-dev
+- and then:- pip install mpi4py
+- also, to run this, the format is:- mpirun -np <no of processes> python <filename>.py
+
+from mpi4py import MPI
+import numpy as np
+
+comm=MPI.COMM_WORLD
+rank=comm.Get_rank()
+size=comm.Get_size()
+
+m=4
+n=4
+p=4
+
+print("RANDOMLY THE MATRICES ARE DEVELOPED!\n")
+
+comm.Barrier()
+start_time=MPI.Wtime()
+
+if rank==0:
+    A=np.random.randint(0,10,size=(m,n))
+    B=np.random.randint(0,10,size=(n,p))
+    print("Matrix A:\n",A)
+    print("Matrix B:\n",B)
+else:
+    A=None
+    B=None
+
+B=comm.bcast(B,root=0)
+
+rows_per_proc=m//size
+extra=m%size
+
+if rank<extra:
+    local_rows=rows_per_proc+1
+else:
+    local_rows=rows_per_proc
+
+if rank==0:
+    A_split=[]
+    idx=0
+    for r in range(size):
+        rcount=rows_per_proc+(1 if r<extra else 0)
+        A_split.append(A[idx:idx+rcount])
+        idx+=rcount
+else:
+    A_split=None
+
+local_A=comm.scatter(A_split,root=0)
+
+local_C=local_A@B
+
+C=comm.gather(local_C,root=0)
+
+comm.Barrier()
+end_time=MPI.Wtime()
+
+if rank==0:
+    C=np.vstack(C)
+    print("\nFinal Result Matrix C = A × B:\n",C)
+    print("\n--- TIMING INFO ---")
+    print(f"Start Time: {start_time:.6f} seconds")
+    print(f"End Time: {end_time:.6f} seconds")
+    print(f"Total Parallel Execution Time: {end_time-start_time:.6f} seconds")
